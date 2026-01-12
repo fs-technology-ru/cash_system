@@ -98,9 +98,9 @@ class BillAcceptorState:
 
     @property
     def remaining_capacity(self) -> int:
-        """Get remaining bill capacity."""
+        """Get remaining bill capacity. Returns max int if unlimited."""
         if self.max_bill_count <= 0:
-            return float("inf")
+            return 2**31 - 1  # Max 32-bit int (effectively unlimited)
         return max(0, self.max_bill_count - self.bill_count)
 
 

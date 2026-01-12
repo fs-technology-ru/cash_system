@@ -8,9 +8,6 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import sys
-sys.path.insert(0, '.')
-
 from core.value_objects import Money, PaymentResult, DispensingResult, PaymentStatus
 from core.exceptions import (
     CashSystemError,

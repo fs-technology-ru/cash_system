@@ -17,6 +17,7 @@ from .exceptions import (
     PaymentError,
     PaymentInProgressError,
     InsufficientFundsError,
+    InvalidAmountError,
     RepositoryError,
     RedisConnectionError,
 )
@@ -48,6 +49,7 @@ __all__ = [
     "PaymentError",
     "PaymentInProgressError",
     "InsufficientFundsError",
+    "InvalidAmountError",
     "RepositoryError",
     "RedisConnectionError",
     # Interfaces
