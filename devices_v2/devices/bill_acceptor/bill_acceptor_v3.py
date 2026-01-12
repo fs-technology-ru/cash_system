@@ -22,9 +22,6 @@ Usage:
     await acceptor.initialize()
     await acceptor.start_accepting()
 """
-
-import asyncio
-import logging
 from typing import Optional
 
 from redis.asyncio import Redis
@@ -35,8 +32,7 @@ from devices.ccnet import (
     StateContext,
     EventType as CCNETEventType,
 )
-
-logger = logging.getLogger(__name__)
+from loggers import logger
 
 
 class BillAcceptor:

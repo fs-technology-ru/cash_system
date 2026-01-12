@@ -2,7 +2,7 @@ import asyncio
 
 from devices.cctalk_coin_acceptor import CcTalkAcceptor
 from devices.coin_acceptor.index import SSP
-from devices.bill_acceptor import bill_acceptor_v1, bill_acceptor_v2
+from devices.bill_acceptor import bill_acceptor_v1, bill_acceptor_v2, bill_acceptor_v3
 from event_system import EventPublisher, EventConsumer, EventType
 from configs import PORT_OPTIONS, BILL_DISPENSER_PORT, bill_acceptor_config, \
     COIN_ACCEPTOR_PORT, MIN_BOX_COUNT
@@ -351,7 +351,7 @@ class PaymentSystemAPI:
 
     async def init_bill_acceptor(self):
         """Инициализация bill acceptor."""
-        await self.redis.set('bill_acceptor_firmware', 'v2')
+        # await self.redis.set('bill_acceptor_firmware', 'v2')
         bill_acceptor_firmware = await self.redis.get('bill_acceptor_firmware')
         if bill_acceptor_firmware == 'v1':
             self.bill_acceptor = bill_acceptor_v1.BillAcceptor(
@@ -360,7 +360,13 @@ class PaymentSystemAPI:
                 self.redis,
             )
         if bill_acceptor_firmware == 'v2':
-            self.bill_acceptor = bill_acceptor_v2.BillAcceptor(
+            self.bill_acceptor = bill_acceptor_v3.BillAcceptor(
+                bill_acceptor_config.BILL_ACCEPTOR_PORT,
+                self.event_publisher,
+                self.redis,
+            )
+        if bill_acceptor_firmware == 'v3':
+            self.bill_acceptor = bill_acceptor_v3.BillAcceptor(
                 bill_acceptor_config.BILL_ACCEPTOR_PORT,
                 self.event_publisher,
                 self.redis,
