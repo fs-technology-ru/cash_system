@@ -4,6 +4,8 @@ Device Manager - Central registry and lifecycle management for devices.
 Provides unified access to all payment devices and manages their lifecycle.
 """
 
+from __future__ import annotations
+
 from typing import Any, Optional
 
 from core.interfaces import Device, DeviceType

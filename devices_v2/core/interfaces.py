@@ -5,6 +5,8 @@ Defines contracts for devices, repositories, and services using
 Python's Protocol for structural subtyping (duck typing with type hints).
 """
 
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto

@@ -4,6 +4,8 @@ Command Handler - Routes Redis commands to API methods.
 Provides clean command routing with validation and error handling.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Callable, Awaitable, Optional
 

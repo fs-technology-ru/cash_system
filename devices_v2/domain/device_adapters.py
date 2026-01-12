@@ -5,6 +5,8 @@ Wraps hardware-specific device drivers with a common interface
 for use in the payment system.
 """
 
+from __future__ import annotations
+
 import asyncio
 from typing import Any, Callable, Optional
 

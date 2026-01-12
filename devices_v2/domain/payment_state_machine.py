@@ -4,6 +4,8 @@ Payment State Machine - Manages payment transaction lifecycle.
 Implements the State pattern for clean payment flow management.
 """
 
+from __future__ import annotations
+
 import asyncio
 from enum import Enum, auto
 from typing import Any, Callable, Optional

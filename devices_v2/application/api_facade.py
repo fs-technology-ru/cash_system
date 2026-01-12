@@ -5,6 +5,8 @@ Provides a clean API that preserves backward compatibility
 while using the new architecture internally.
 """
 
+from __future__ import annotations
+
 import asyncio
 from typing import Any, Optional
 

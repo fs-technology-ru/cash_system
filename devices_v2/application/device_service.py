@@ -4,6 +4,8 @@ Device Service - Application service for device management.
 Provides high-level operations for device initialization, status, and control.
 """
 
+from __future__ import annotations
+
 from typing import Any, Optional
 
 from redis.asyncio import Redis

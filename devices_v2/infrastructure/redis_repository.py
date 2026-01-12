@@ -5,6 +5,8 @@ Provides type-safe, domain-specific access to Redis state storage.
 Each repository encapsulates Redis keys and operations for its domain.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Any, Optional
 
