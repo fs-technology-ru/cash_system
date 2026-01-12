@@ -18,6 +18,7 @@ from .constants import (
     DeviceState,
     DEFAULT_DEVICE_ADDRESS,
     POLL_INTERVAL_MS,
+    STATES_REQUIRING_ACK,
     get_state_name,
 )
 from .transport import CCNETTransport, CCNETPacket
@@ -110,6 +111,12 @@ class CCNETProtocol:
         """
         Send POLL command and parse response.
         
+        Per CCNET Protocol Description page 13:
+        "The Controller must respond to data from a Peripheral with an Acknowledgment (ACK)"
+        
+        Per page 20, states marked with * (BILL_STACKED, BILL_RETURNED, CHEATED, etc.)
+        will be reported repeatedly until ACK is received by the device.
+        
         Returns:
             Parsed poll response or None on error.
         """
@@ -122,6 +129,15 @@ class CCNETProtocol:
         # Parse response
         state = response.command  # State code is in command byte
         data = response.data
+        
+        # Send ACK for event states that require acknowledgment
+        # Per CCNET protocol, these states will repeat until ACK is sent
+        if state in STATES_REQUIRING_ACK:
+            logger.debug(f"Sending ACK for event state: {get_state_name(state)}")
+            try:
+                await self.send_ack()
+            except Exception as e:
+                logger.warning(f"Failed to send ACK for {get_state_name(state)}: {e}")
         
         return PollResponse(
             state=state,
