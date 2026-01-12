@@ -129,6 +129,9 @@ def get_logger(
     Returns:
         Configured logger instance.
     """
+    import os
+    from pathlib import Path
+
     logger_instance = logging.getLogger(name)
     logger_instance.setLevel(level)
 
@@ -156,9 +159,18 @@ def get_logger(
         datefmt=DEFAULT_DATE_FORMAT,
     )
 
+    # Ensure log directory exists, fallback to local logs/ if not possible
+    log_path = Path(log_file)
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except PermissionError:
+        # Fallback to local logs directory
+        log_path = Path("logs") / log_path.name
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
     # File handler with rotation
     file_handler = RotatingFileHandler(
-        log_file,
+        str(log_path),
         maxBytes=MAX_LOG_FILE_SIZE,
         backupCount=LOG_BACKUP_COUNT,
         encoding="utf-8",
