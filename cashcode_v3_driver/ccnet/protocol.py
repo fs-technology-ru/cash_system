@@ -212,7 +212,7 @@ class CCNETProtocol:
         Returns:
             True if command acknowledged.
         """
-        return await self.enable_bill_types(bill_mask=0, security_mask=0)
+        return await self.enable_bill_types(bill_enable_mask=0, escrow_enable_mask=0)
     
     async def stack(self) -> bool:
         """
