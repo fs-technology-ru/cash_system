@@ -134,7 +134,10 @@ class CCNETProtocol:
         # Per CCNET protocol, these states will repeat until ACK is sent
         if state in STATES_REQUIRING_ACK:
             logger.debug(f"Sending ACK for event state: {get_state_name(state)}")
-            await self.send_ack()
+            try:
+                await self.send_ack()
+            except Exception as e:
+                logger.warning(f"Failed to send ACK for {get_state_name(state)}: {e}")
         
         return PollResponse(
             state=state,
