@@ -1,155 +1,212 @@
+"""
+Payment System API for cash handling devices.
+
+This module provides the main API for interacting with cash payment devices
+including bill acceptors, coin acceptors, bill dispensers, and coin hoppers.
+All device state is persisted in Redis for coordination across processes.
+"""
+
 import asyncio
+from typing import Any, Optional
+
+from redis.asyncio import Redis
 
 from devices.cctalk_coin_acceptor import CcTalkAcceptor
 from devices.coin_acceptor.index import SSP
-from devices.bill_acceptor import bill_acceptor_v1, bill_acceptor_v2, bill_acceptor_v3
-from event_system import EventPublisher, EventConsumer, EventType
-from configs import PORT_OPTIONS, BILL_DISPENSER_PORT, bill_acceptor_config, \
-    COIN_ACCEPTOR_PORT, MIN_BOX_COUNT
+from devices.bill_acceptor import bill_acceptor_v1, bill_acceptor_v3
 from devices.bill_dispenser.bill_dispenser import Clcdm2000, LcdmException
+from event_system import EventPublisher, EventConsumer, EventType
+from configs import (
+    PORT_OPTIONS,
+    BILL_DISPENSER_PORT,
+    bill_acceptor_config,
+    COIN_ACCEPTOR_PORT,
+    MIN_BOX_COUNT,
+)
 from loggers import logger
 from redis_error_handler import redis_error_handler
 from send_to_ws import send_to_ws
 
 
 class PaymentSystemAPI:
-    """Api для взаимодействия с наличной системой оплаты."""
-    COIN_DISPENSER_NAME = "coin_dispenser"
-    COIN_ACCEPTOR_NAME = "coin_acceptor"
-    BILL_ACCEPTOR_NAME = "bill_acceptor"
-    BILL_DISPENSER_NAME = "bill_dispenser"
+    """
+    API for interacting with cash payment devices.
 
-    def __init__(self, redis):
+    This class manages the lifecycle and operations of all cash handling
+    devices, including initialization, payment processing, and change dispensing.
+
+    Attributes:
+        redis: Redis client for state persistence.
+        active_devices: Set of currently active device names.
+        is_payment_in_progress: Flag indicating if a payment is being processed.
+    """
+
+    # Device name constants
+    COIN_DISPENSER_NAME: str = "coin_dispenser"
+    COIN_ACCEPTOR_NAME: str = "coin_acceptor"
+    BILL_ACCEPTOR_NAME: str = "bill_acceptor"
+    BILL_DISPENSER_NAME: str = "bill_dispenser"
+
+    def __init__(self, redis: Redis) -> None:
+        """
+        Initialize the payment system API.
+
+        Args:
+            redis: Redis client instance for state management.
+        """
         # Event system
-        self.event_queue = asyncio.Queue()
+        self.event_queue: asyncio.Queue = asyncio.Queue()
         self.event_publisher = EventPublisher(self.event_queue)
         self.event_consumer = EventConsumer(self.event_queue)
 
         # Redis connection
         self.redis = redis
 
-        # Devices instances
-        self.hopper = SSP(self.event_publisher) # SSP Хоппер для выдачи сдачи
-        self.cctalk_acceptor = CcTalkAcceptor(self.event_publisher) # ccTalk Монетоприемник
-        self.bill_acceptor = None
+        # Device instances
+        self.hopper = SSP(self.event_publisher)
+        self.cctalk_acceptor = CcTalkAcceptor(self.event_publisher)
+        self.bill_acceptor: Optional[Any] = None
         self.bill_dispenser = Clcdm2000()
 
         # Payment tracking
-        self.target_amount = 0
-        self.collected_amount = 0
-        self.active_devices = set()
-        self.is_payment_in_progress = False
+        self.target_amount: int = 0
+        self.collected_amount: int = 0
+        self.active_devices: set[str] = set()
+        self.is_payment_in_progress: bool = False
 
         # Bill dispenser configurations
-        self.upper_box_value = None
-        self.lower_box_value = None
-        self.upper_box_count = None
-        self.lower_box_count = None
+        self.upper_box_value: Optional[int] = None
+        self.lower_box_value: Optional[int] = None
+        self.upper_box_count: Optional[int] = None
+        self.lower_box_count: Optional[int] = None
 
 
-    async def bill_acceptor_status(self):
-        """Статус купюроприемника."""
+    async def bill_acceptor_status(self) -> dict[str, Any]:
+        """
+        Get the current status of the bill acceptor.
+
+        Returns:
+            Dictionary containing success status and bill count information.
+        """
         try:
-            max_bill_count = await self.redis.get('max_bill_count')
-            bill_count = await self.redis.get('bill_count')
+            max_bill_count = await self.redis.get("max_bill_count")
+            bill_count = await self.redis.get("bill_count")
             return {
-                'success': True,
-                'message': 'Статус купюроприемника получен успешно',
-                'data': {
-                    'max_bill_count': int(max_bill_count) if max_bill_count else 0,
-                    'bill_count': int(bill_count) if bill_count else 0,
-                }
+                "success": True,
+                "message": "Bill acceptor status retrieved successfully",
+                "data": {
+                    "max_bill_count": int(max_bill_count) if max_bill_count else 0,
+                    "bill_count": int(bill_count) if bill_count else 0,
+                },
             }
         except (ConnectionError, TimeoutError) as e:
             logger.error(f"Redis connection issue: {e}")
             return {
-                'success': False,
-                'message': f"Redis connection issue: {e}"
+                "success": False,
+                "message": f"Redis connection issue: {e}",
             }
 
+    async def bill_dispenser_status(self) -> dict[str, Any]:
+        """
+        Get the current status of the bill dispenser.
 
-    async def bill_dispenser_status(self):
-        """Статус купюродиспенсера."""
+        Returns:
+            Dictionary containing success status and dispenser configuration.
+        """
         try:
-            upper_box_value = await self.redis.get('bill_dispenser:upper_lvl')
-            lower_box_value = await self.redis.get('bill_dispenser:lower_lvl')
-            upper_box_count = await self.redis.get('bill_dispenser:upper_count')
-            lower_box_count = await self.redis.get('bill_dispenser:lower_count')
+            upper_box_value = await self.redis.get("bill_dispenser:upper_lvl")
+            lower_box_value = await self.redis.get("bill_dispenser:lower_lvl")
+            upper_box_count = await self.redis.get("bill_dispenser:upper_count")
+            lower_box_count = await self.redis.get("bill_dispenser:lower_count")
             return {
-                'success': True,
-                'message': 'Статус купюродиспенсера получен успешно',
-                'data': {
-                    'upper_box_value': int(upper_box_value) * 100,
-                    'lower_box_value': int(lower_box_value) * 100,
-                    'upper_box_count': int(upper_box_count),
-                    'lower_box_count': int(lower_box_count),
-                }
+                "success": True,
+                "message": "Bill dispenser status retrieved successfully",
+                "data": {
+                    "upper_box_value": int(upper_box_value) * 100,
+                    "lower_box_value": int(lower_box_value) * 100,
+                    "upper_box_count": int(upper_box_count),
+                    "lower_box_count": int(lower_box_count),
+                },
             }
         except (ConnectionError, TimeoutError) as e:
             logger.error(f"Redis connection issue: {e}")
             return {
-                'success': False,
-                'message': f"Redis connection issue: {e}"
+                "success": False,
+                "message": f"Redis connection issue: {e}",
             }
 
+    @redis_error_handler("Maximum bill count set successfully")
+    async def bill_acceptor_set_max_bill_count(self, value: int) -> None:
+        """
+        Set the maximum bill count for the acceptor.
 
-    @redis_error_handler("Максимальное количество купюр установлено успешно")
-    async def bill_acceptor_set_max_bill_count(self, value: int):
-        """Установка максимального количества купюр."""
-        await self.redis.set('max_bill_count', value)
+        Args:
+            value: Maximum number of bills the acceptor can hold.
+        """
+        await self.redis.set("max_bill_count", value)
         await self.init_bill_acceptor()
 
+    @redis_error_handler("Bill count reset successfully")
+    async def bill_acceptor_reset_bill_count(self) -> None:
+        """Reset the bill count to zero (cash collection)."""
+        await self.redis.set("bill_count", 0)
 
-    @redis_error_handler("Количество купюр в купюроприемнике обнулено успешно")
-    async def bill_acceptor_reset_bill_count(self):
-        """Сброс количества купюр в купюроприемнике (инкасация)."""
-        await self.redis.set('bill_count', 0)
-
-
-    @redis_error_handler("Номиналы диспенсера купюр установлены успешно")
-    async def set_bill_dispenser_lvl(self, upper_lvl, lower_lvl):
-        """Установка номиналов купюр в диспенсере."""
-        await self.redis.set('bill_dispenser:upper_lvl', upper_lvl)
-        await self.redis.set('bill_dispenser:lower_lvl', lower_lvl)
-
-
-    @redis_error_handler("Количество купюр диспенсера установлено успешно")
-    async def set_bill_dispenser_count(self, upper_count, lower_count):
+    @redis_error_handler("Bill dispenser denominations set successfully")
+    async def set_bill_dispenser_lvl(self, upper_lvl: int, lower_lvl: int) -> None:
         """
-        Изменение количества купюр в диспенсере.
-        Прибавляет переданное значение к существующему.
+        Set the denomination values for the bill dispenser boxes.
+
+        Args:
+            upper_lvl: Denomination value for the upper box.
+            lower_lvl: Denomination value for the lower box.
         """
-        old_upper_count = int(await self.redis.get('bill_dispenser:upper_count'))
-        old_lower_count = int(await self.redis.get('bill_dispenser:lower_count'))
-        await self.redis.set('bill_dispenser:upper_count', upper_count + old_upper_count)
-        await self.redis.set('bill_dispenser:lower_count', lower_count + old_lower_count)
+        await self.redis.set("bill_dispenser:upper_lvl", upper_lvl)
+        await self.redis.set("bill_dispenser:lower_lvl", lower_lvl)
+
+    @redis_error_handler("Bill dispenser count updated successfully")
+    async def set_bill_dispenser_count(self, upper_count: int, lower_count: int) -> None:
+        """
+        Add bills to the dispenser count.
+
+        Args:
+            upper_count: Number of bills to add to the upper box.
+            lower_count: Number of bills to add to the lower box.
+        """
+        old_upper_count = int(await self.redis.get("bill_dispenser:upper_count") or 0)
+        old_lower_count = int(await self.redis.get("bill_dispenser:lower_count") or 0)
+        await self.redis.set("bill_dispenser:upper_count", upper_count + old_upper_count)
+        await self.redis.set("bill_dispenser:lower_count", lower_count + old_lower_count)
+
+    @redis_error_handler("Bill dispenser count reset successfully")
+    async def bill_dispenser_reset_bill_count(self) -> None:
+        """Reset the bill dispenser counts to zero."""
+        await self.redis.set("bill_dispenser:upper_count", 0)
+        await self.redis.set("bill_dispenser:lower_count", 0)
 
 
-    @redis_error_handler("Количество купюр в диспенсере обнулено успешно")
-    async def bill_dispenser_reset_bill_count(self):
-        """Сброс количества купюр в диспенсере."""
-        await self.redis.set('bill_dispenser:upper_count', 0)
-        await self.redis.set('bill_dispenser:lower_count', 0)
+    async def stop_accepting_payment(self) -> dict[str, Any]:
+        """
+        Stop the current payment and return collected amount.
 
-
-    async def stop_accepting_payment(self):
-        """Остановка активного платежа."""
+        Returns:
+            Dictionary with success status and collected amount.
+        """
         if not self.is_payment_in_progress:
-            logger.warning('Платеж не был запущен')
+            logger.warning("No payment in progress")
             return {
-                'success': False,
-                'message': 'Платеж не был запущен',
+                "success": False,
+                "message": "No payment in progress",
             }
-        
-        logger.info('Остановка платежа...')
-        
-        # Останавливаем устройства
+
+        logger.info("Stopping payment...")
+
+        # Stop devices
         if self.COIN_ACCEPTOR_NAME in self.active_devices:
             try:
                 await self.cctalk_acceptor.disable()
             except Exception as e:
                 logger.error(f"Error disabling cctalk_acceptor: {e}")
-        
+
         if self.BILL_ACCEPTOR_NAME in self.active_devices and self.bill_acceptor:
             try:
                 await self.bill_acceptor.stop_accepting()
@@ -157,94 +214,114 @@ class PaymentSystemAPI:
                 await self.bill_acceptor.reset_device()
             except Exception as e:
                 logger.error(f"Error stopping bill acceptor: {e}")
-        
-        # Сбрасываем состояние
+
+        # Store collected amount before reset
+        collected = self.collected_amount
+
+        # Reset state
         self.is_payment_in_progress = False
         self.target_amount = 0
-        collected = self.collected_amount
         self.collected_amount = 0
-        
-        # Сброс Redis
-        await self.redis.set('collected_amount', 0)
-        await self.redis.set('target_amount', 0)
-        
-        logger.info(f'Платеж остановлен. Было собрано: {collected / 100} руб')
+
+        # Reset Redis
+        await self.redis.set("collected_amount", 0)
+        await self.redis.set("target_amount", 0)
+
+        logger.info(f"Payment stopped. Collected: {collected / 100} RUB")
         return {
-            'success': True,
-            'message': f'Платеж остановлен. Было собрано: {collected / 100} руб',
-            'collected_amount': collected,
+            "success": True,
+            "message": f"Payment stopped. Collected: {collected / 100} RUB",
+            "collected_amount": collected,
         }
 
+    @redis_error_handler("Change dispensing test successful")
+    async def test_dispense_change(self, is_bill: bool, is_coin: bool) -> None:
+        """
+        Test change dispensing functionality.
 
-    @redis_error_handler("Тест выдачи сдачи прошел успешно")
-    async def test_dispense_change(self, is_bill: bool, is_coin: bool):
-        """Тест выдачи сдачи."""
+        Args:
+            is_bill: Whether to test bill dispensing.
+            is_coin: Whether to test coin dispensing.
+        """
         try:
             if is_coin:
                 await self.hopper.enable()
-                await self.hopper.command('PAYOUT_AMOUNT', {
-                    'amount': 100,
-                    'country_code': 'RUB',
-                    'test': False
+                await self.hopper.command("PAYOUT_AMOUNT", {
+                    "amount": 100,
+                    "country_code": "RUB",
+                    "test": False,
                 })
             if is_bill:
-                self.upper_box_value = int(await self.redis.get('bill_dispenser:upper_lvl'))
-                self.lower_box_value = int(await self.redis.get('bill_dispenser:lower_lvl'))
+                self.upper_box_value = int(await self.redis.get("bill_dispenser:upper_lvl"))
+                self.lower_box_value = int(await self.redis.get("bill_dispenser:lower_lvl"))
                 await self.dispense_change(self.upper_box_value + self.lower_box_value)
         except Exception as e:
             return {
-                'success': False,
-                'message': f"Ошибка при выдаче сдачи: {e}"
+                "success": False,
+                "message": f"Error dispensing change: {e}",
             }
 
 
-    async def coin_system_add_coin_count(self, value: int, denomination: int):
-        """Добавление монет определенного уровня."""
+    async def coin_system_add_coin_count(self, value: int, denomination: int) -> dict[str, Any]:
+        """
+        Add coins of a specific denomination to the hopper.
+
+        Args:
+            value: Number of coins to add.
+            denomination: Coin denomination in kopecks.
+
+        Returns:
+            Dictionary indicating success.
+        """
         try:
-            logger.info("Opening SSP hopper to add coin count...")
+            logger.info("Opening SSP hopper to add coins...")
             self.hopper.open(COIN_ACCEPTOR_PORT, PORT_OPTIONS)
-            await self.hopper.command('SYNC')
-            await self.hopper.command('SET_DENOMINATION_LEVEL', {
-                'value': value,
-                'denomination': denomination,
-                'country_code': 'RUB',
+            await self.hopper.command("SYNC")
+            await self.hopper.command("SET_DENOMINATION_LEVEL", {
+                "value": value,
+                "denomination": denomination,
+                "country_code": "RUB",
             })
-            logger.info('Добавление монет прошло успешно')
+            logger.info("Coins added successfully")
             return {
-                'success': True,
-                'message': 'Добавление монет прошло успешно',
+                "success": True,
+                "message": "Coins added successfully",
             }
         except Exception as e:
-            logger.error(f"Error in coin_system_add_coin_count: {e}")
+            logger.error(f"Error adding coins: {e}")
             return {
-                'success': False,
-                'message': f"Ошибка при работе с hopper: {e}"
+                "success": False,
+                "message": f"Error adding coins: {e}",
             }
         finally:
-            logger.info("Closing SSP hopper after adding coin count.")
+            logger.info("Closing SSP hopper after adding coins.")
             if self.hopper.port and self.hopper.port.is_open:
                 await self.hopper.disable()
                 await self.hopper.close()
                 await asyncio.sleep(0.1)
 
+    async def coin_system_status(self) -> dict[str, Any]:
+        """
+        Get the current status of the coin hopper.
 
-    async def coin_system_status(self):
-        """Получение статуса hopper (уровни монет)."""
+        Returns:
+            Dictionary with hopper status and coin levels.
+        """
         try:
-            logger.info("Opening SSP hopper for status check...")
+            logger.info("Checking hopper status...")
             self.hopper.open(COIN_ACCEPTOR_PORT, PORT_OPTIONS)
-            await self.hopper.command('SYNC')
-            status = await self.hopper.command('GET_ALL_LEVELS')
+            await self.hopper.command("SYNC")
+            status = await self.hopper.command("GET_ALL_LEVELS")
             return {
-                'success': True,
-                'data': status,
-                'message': 'Статус hopper получен успешно',
+                "success": True,
+                "data": status,
+                "message": "Hopper status retrieved successfully",
             }
         except Exception as e:
-            logger.error(f"Error in coin_system_status: {e}")
+            logger.error(f"Error getting hopper status: {e}")
             return {
-                'success': False,
-                'message': f"Ошибка при работе с hopper: {e}"
+                "success": False,
+                "message": f"Error getting hopper status: {e}",
             }
         finally:
             logger.info("Closing SSP hopper after status check.")
@@ -252,24 +329,28 @@ class PaymentSystemAPI:
                 await self.hopper.close()
                 await asyncio.sleep(0.1)
 
+    async def coin_system_cash_collection(self) -> dict[str, Any]:
+        """
+        Perform cash collection from the hopper.
 
-    async def coin_system_cash_collection(self):
-        """Инкассация."""
+        Returns:
+            Dictionary indicating success.
+        """
         try:
-            logger.info("Opening SSP hopper for cash collection...")
+            logger.info("Starting hopper cash collection...")
             self.hopper.open(COIN_ACCEPTOR_PORT, PORT_OPTIONS)
             await self.hopper.enable()
-            await self.hopper.command('SYNC')
-            await self.hopper.command('EMPTY_ALL')
+            await self.hopper.command("SYNC")
+            await self.hopper.command("EMPTY_ALL")
             return {
-                'success': True,
-                'message': 'Инкассация hopper запущена успешно',
+                "success": True,
+                "message": "Cash collection started successfully",
             }
         except Exception as e:
-            logger.error(f"Error in coin_system_cash_collection: {e}")
+            logger.error(f"Error during cash collection: {e}")
             return {
-                'success': False,
-                'message': f"Ошибка при инкассации hopper: {e}"
+                "success": False,
+                "message": f"Error during cash collection: {e}",
             }
         finally:
             logger.info("Closing SSP hopper after cash collection.")
@@ -279,8 +360,13 @@ class PaymentSystemAPI:
                 await asyncio.sleep(0.1)
 
 
-    async def init_devices(self):
-        """Инициализация устройств."""
+    async def init_devices(self) -> dict[str, Any]:
+        """
+        Initialize all payment devices.
+
+        Returns:
+            Dictionary indicating initialization success.
+        """
         is_hopper = await self.init_ssp_hopper()
         if is_hopper:
             self.active_devices.add(self.COIN_DISPENSER_NAME)
@@ -288,6 +374,7 @@ class PaymentSystemAPI:
         is_coin = await self.init_cctalk_coin_acceptor()
         if is_coin:
             self.active_devices.add(self.COIN_ACCEPTOR_NAME)
+
         await self.init_bill_acceptor()
         await self.init_bill_dispenser()
 
@@ -297,221 +384,255 @@ class PaymentSystemAPI:
         available_devices = await self.redis.smembers("available_devices_cash")
 
         if available_devices.issubset(self.active_devices):
-            logger.info('Платежная система инициализирована успешно')
+            logger.info("Payment system initialized successfully")
             return {
-                'success': True,
-                'message': 'Платежная система инициализирована успешно',
+                "success": True,
+                "message": "Payment system initialized successfully",
             }
         else:
-            logger.error(
-                f'Не удалось инициализировать устройтсва: '
-                f'{available_devices - self.active_devices}')
+            missing = available_devices - self.active_devices
+            logger.error(f"Failed to initialize devices: {missing}")
             return {
-                'success': False,
-                'message': f'Не удалось инициализировать устройтсва: '
-                           f'{available_devices - self.active_devices}',
+                "success": False,
+                "message": f"Failed to initialize devices: {missing}",
             }
 
+    async def init_ssp_hopper(self) -> bool:
+        """
+        Initialize the SSP hopper for coin dispensing.
 
-    async def init_ssp_hopper(self):
-        """Инициализация Smart Hopper (SSP). Используется для выдачи сдачи."""
+        Returns:
+            True if initialization successful.
+        """
         try:
             self.hopper.open(COIN_ACCEPTOR_PORT, PORT_OPTIONS)
 
-            await self.hopper.command('SYNC')
-            await self.hopper.command('HOST_PROTOCOL_VERSION', {'version': 6})
+            await self.hopper.command("SYNC")
+            await self.hopper.command("HOST_PROTOCOL_VERSION", {"version": 6})
             await self.hopper.init_encryption()
-            await self.hopper.command('SETUP_REQUEST')
+            await self.hopper.command("SETUP_REQUEST")
 
-            # Важно: отключаем прием монет в SSP, так как он теперь только для выдачи
+            # Disable coin acceptance (hopper is for dispensing only)
             await self.hopper.disable()
 
-            logger.info('SSP Хоппер инициализирован успешно (только для выдачи)')
+            logger.info("SSP hopper initialized successfully (dispense only)")
             return True
         except Exception as e:
-            logger.error(f'Ошибка инициализации SSP Хоппера: {e}')
+            logger.error(f"Failed to initialize SSP hopper: {e}")
             return False
         finally:
             if self.hopper.port and self.hopper.port.is_open:
                 await self.hopper.close()
 
+    async def init_cctalk_coin_acceptor(self) -> bool:
+        """
+        Initialize the ccTalk coin acceptor.
 
-    async def init_cctalk_coin_acceptor(self):
-        """Инициализация монетоприемника (ccTalk)."""
+        Returns:
+            True if initialization successful.
+        """
         try:
-            self.cctalk_acceptor.port = '/dev/ttyUSB0' # Устанавливаем порт для ccTalk монетоприемника
+            self.cctalk_acceptor.port = "/dev/ttyUSB0"
             if await self.cctalk_acceptor.initialize():
-                logger.info('ccTalk монетоприемник инициализирован успешно')
+                logger.info("ccTalk coin acceptor initialized successfully")
                 return True
             else:
-                raise Exception("Метод initialize() для ccTalk вернул False")
+                raise Exception("initialize() returned False")
         except Exception as e:
-            logger.error(f'Ошибка инициализации ccTalk монетоприемника: {e}')
+            logger.error(f"Failed to initialize ccTalk coin acceptor: {e}")
             return False
 
-    async def init_bill_acceptor(self):
-        """Инициализация bill acceptor."""
-        # await self.redis.set('bill_acceptor_firmware', 'v2')
-        bill_acceptor_firmware = await self.redis.get('bill_acceptor_firmware')
-        if bill_acceptor_firmware == 'v1':
+    async def init_bill_acceptor(self) -> None:
+        """Initialize the bill acceptor based on firmware version."""
+        bill_acceptor_firmware = await self.redis.get("bill_acceptor_firmware")
+
+        if bill_acceptor_firmware == "v1":
             self.bill_acceptor = bill_acceptor_v1.BillAcceptor(
                 bill_acceptor_config.BILL_ACCEPTOR_PORT,
                 self.event_publisher,
                 self.redis,
             )
-        if bill_acceptor_firmware == 'v2':
+        elif bill_acceptor_firmware in ("v2", "v3"):
             self.bill_acceptor = bill_acceptor_v3.BillAcceptor(
                 bill_acceptor_config.BILL_ACCEPTOR_PORT,
                 self.event_publisher,
                 self.redis,
             )
-        if bill_acceptor_firmware == 'v3':
-            self.bill_acceptor = bill_acceptor_v3.BillAcceptor(
-                bill_acceptor_config.BILL_ACCEPTOR_PORT,
-                self.event_publisher,
-                self.redis,
-            )
+
+        if self.bill_acceptor is None:
+            logger.warning("No bill acceptor firmware version configured")
+            return
+
         try:
             if not await self.bill_acceptor.initialize():
-                raise
+                raise Exception("initialize() returned False")
             await self.bill_acceptor.reset_device()
-            logger.info("Купюроприемник инициализирован успешно")
+            logger.info("Bill acceptor initialized successfully")
             self.active_devices.add(self.BILL_ACCEPTOR_NAME)
         except Exception as e:
-            logger.error(f"Ошибка инициализации купюроприемника: {e}")
+            logger.error(f"Failed to initialize bill acceptor: {e}")
 
-
-    async def init_bill_dispenser(self):
-        """Инициализация bill dispenser."""
+    async def init_bill_dispenser(self) -> None:
+        """Initialize the bill dispenser."""
         try:
             self.bill_dispenser.connect(BILL_DISPENSER_PORT, 9600)
             self.bill_dispenser.purge()
-            logger.info('Bill dispenser инициализирован успешно')
+            logger.info("Bill dispenser initialized successfully")
             self.active_devices.add(self.BILL_DISPENSER_NAME)
         except LcdmException as e:
-            logger.error(f'Ошибка соединения при инициализации Bill dispenser: {e}')
+            logger.error(f"Failed to initialize bill dispenser: {e}")
 
 
-    def register_event_handlers(self):
-        """Регистрация обработчиков для событий приема монет и купюр."""
-        self.event_consumer.register_handler(EventType.BILL_ACCEPTED, self.handle_bill_accepted)
-        self.event_consumer.register_handler(EventType.COIN_CREDIT, self.on_coin_credit)
+    def register_event_handlers(self) -> None:
+        """Register handlers for device events."""
+        self.event_consumer.register_handler(
+            EventType.BILL_ACCEPTED,
+            self.handle_bill_accepted,
+        )
+        self.event_consumer.register_handler(
+            EventType.COIN_CREDIT,
+            self.on_coin_credit,
+        )
 
+    async def handle_bill_accepted(self, event: dict[str, Any]) -> None:
+        """
+        Handle bill acceptance event.
 
-    async def handle_bill_accepted(self, event):
-        """Обработчик принятия купюры."""
-        bill_value = event['value']
+        Args:
+            event: Event dictionary with bill value.
+        """
+        bill_value = event["value"]
         self.collected_amount += bill_value
-        await self.redis.set('collected_amount', self.collected_amount)
+        await self.redis.set("collected_amount", self.collected_amount)
 
-        logger.info(f"Принята купюра: {bill_value / 100} рублей. Всего принято: {self.collected_amount / 100} рублей")
+        logger.info(
+            f"Bill accepted: {bill_value / 100} RUB. "
+            f"Total: {self.collected_amount / 100} RUB"
+        )
+
         await send_to_ws(
-            event='acceptedBill',
-            data={'bill_value': bill_value, 'collected_amount': self.collected_amount},
+            event="acceptedBill",
+            data={"bill_value": bill_value, "collected_amount": self.collected_amount},
         )
 
         if self.target_amount != 0 and self.collected_amount >= self.target_amount:
             await self.complete_payment()
 
+    async def on_coin_credit(self, event: dict[str, Any]) -> None:
+        """
+        Handle coin credit event from ccTalk device.
 
-    async def on_coin_credit(self, event):
-        """Обработчик принятия монеты от ccTalk устройства."""
+        Args:
+            event: Event dictionary with coin value.
+        """
         try:
-            amount = event.get('value')
+            amount = event.get("value")
             if amount is None:
-                logger.error(f"Ошибка, событие от монетоприемника не содержит номинала: {event}")
+                logger.error(f"Coin event missing value: {event}")
                 return
 
-            # Обновляем счетчик монет в хоппере
+            # Update hopper inventory
             await self.coin_system_add_coin_count(value=1, denomination=amount)
 
-            # Сумма приходит в копейках, как и в остальной части системы
             self.collected_amount += amount
-            await self.redis.set('collected_amount', self.collected_amount)
+            await self.redis.set("collected_amount", self.collected_amount)
 
-            logger.info(f"Принята монета: {amount / 100} рублей. Всего: {self.collected_amount / 100} рублей")
-            await send_to_ws(
-                event='acceptedCoin',
-                data={'coin_value': amount, 'collected_amount': self.collected_amount},
+            logger.info(
+                f"Coin accepted: {amount / 100} RUB. "
+                f"Total: {self.collected_amount / 100} RUB"
             )
 
-            # Проверяем, достигнута ли целевая сумма
-            if (self.target_amount > 0) and (self.collected_amount >= self.target_amount):
+            await send_to_ws(
+                event="acceptedCoin",
+                data={"coin_value": amount, "collected_amount": self.collected_amount},
+            )
+
+            if self.target_amount > 0 and self.collected_amount >= self.target_amount:
                 await self.complete_payment()
 
         except Exception as e:
-            logger.error(f'Ошибка при обработке события принятия монеты: {e}')
+            logger.error(f"Error handling coin credit: {e}")
 
 
-    async def start_accepting_payment(self, amount):
-        """Начало платежа."""
+    async def start_accepting_payment(self, amount: int) -> dict[str, Any]:
+        """
+        Start accepting payment for the specified amount.
+
+        Args:
+            amount: Target payment amount in kopecks.
+
+        Returns:
+            Dictionary indicating success and active devices.
+        """
         if amount <= 0:
-            logger.error(f'Некорректная сумма платежа: {amount}')
+            logger.error(f"Invalid payment amount: {amount}")
             return {
-                'success': False,
-                'message': 'Некорректная сумма платежа',
+                "success": False,
+                "message": "Invalid payment amount",
             }
-        
-        upper_box_count = int(await self.redis.get('bill_dispenser:upper_count'))
-        lower_box_count = int(await self.redis.get('bill_dispenser:lower_count'))
-        bill_count = int(await self.redis.get('bill_count'))
-        max_bill_count = int(await self.redis.get('max_bill_count'))
-        is_test_mode = await self.redis.get('cash_system_is_test_mode')
+
+        upper_box_count = int(await self.redis.get("bill_dispenser:upper_count") or 0)
+        lower_box_count = int(await self.redis.get("bill_dispenser:lower_count") or 0)
+        bill_count = int(await self.redis.get("bill_count") or 0)
+        max_bill_count = int(await self.redis.get("max_bill_count") or 0)
+        is_test_mode = await self.redis.get("cash_system_is_test_mode")
 
         if self.is_payment_in_progress:
-            logger.error('Платеж уже запущен')
+            logger.error("Payment already in progress")
             return {
-                'success': False,
-                'message': 'Платеж уже запущен',
+                "success": False,
+                "message": "Payment already in progress",
             }
 
         if is_test_mode:
-            logger.info('Тестовый режим — пропускаем проверки купюр.')
+            logger.info("Test mode - skipping validation")
         elif upper_box_count < MIN_BOX_COUNT or lower_box_count < MIN_BOX_COUNT:
-            logger.error(f'В bill_dispenser недостаточно купюр, менее {MIN_BOX_COUNT}. '
-                         f'Верхний: {upper_box_count}, Нижний: {lower_box_count}')
+            logger.error(
+                f"Insufficient bills in dispenser. "
+                f"Upper: {upper_box_count}, Lower: {lower_box_count}"
+            )
             return {
-                'success': False,
-                'message': 'В устройстве bill_dispenser не достаточно купюр.',
+                "success": False,
+                "message": "Insufficient bills in dispenser",
             }
         elif bill_count >= max_bill_count:
-            logger.error('Устройство bill acceptor переполнено')
+            logger.error("Bill acceptor is full")
             return {
-                'success': False,
-                'message': 'Устройство bill acceptor переполнено',
+                "success": False,
+                "message": "Bill acceptor is full",
             }
 
-        logger.info(f"Начат прием на сумму {amount / 100} рублей")
+        logger.info(f"Starting payment acceptance for {amount / 100} RUB")
 
-        # Устанавливаем значения ПЕРЕД запуском устройств
+        # Set payment state before starting devices
         self.target_amount = amount
         self.collected_amount = 0
         self.is_payment_in_progress = True
 
-        await self.redis.set('target_amount', amount)
-        await self.redis.set('collected_amount', 0)
+        await self.redis.set("target_amount", amount)
+        await self.redis.set("collected_amount", 0)
 
-        devices_started = []
-        errors = []
+        devices_started: list[str] = []
+        errors: list[str] = []
 
-        # Запускаем устройства с обработкой ошибок
+        # Start devices with error handling
         if self.COIN_ACCEPTOR_NAME in self.active_devices:
             try:
                 await self.cctalk_acceptor.enable()
                 devices_started.append(self.COIN_ACCEPTOR_NAME)
-                logger.info("ccTalk Coin acceptor enabled")
+                logger.info("Coin acceptor enabled")
             except Exception as e:
-                logger.error(f"Failed to enable cctalk_coin_acceptor: {e}")
+                logger.error(f"Failed to enable coin acceptor: {e}")
                 errors.append(f"{self.COIN_ACCEPTOR_NAME}: {e}")
 
         if self.BILL_ACCEPTOR_NAME in self.active_devices and self.bill_acceptor:
             try:
-                # Убеждаемся что устройство не активно
+                # Ensure device is not active
                 if self.bill_acceptor._active:
-                    logger.warning("Bill acceptor was already active, stopping first")
+                    logger.warning("Bill acceptor was active, stopping first")
                     await self.bill_acceptor.stop_accepting()
                     await asyncio.sleep(0.5)
-                
+
                 await self.bill_acceptor.start_accepting()
                 devices_started.append(self.BILL_ACCEPTOR_NAME)
                 logger.info("Bill acceptor enabled")
@@ -520,218 +641,223 @@ class PaymentSystemAPI:
                 errors.append(f"{self.BILL_ACCEPTOR_NAME}: {e}")
 
         if devices_started:
-            message = f"Начат прием на сумму {amount / 100} руб. Активны: {', '.join(devices_started)}"
+            message = f"Accepting payment of {amount / 100} RUB. Active: {', '.join(devices_started)}"
             if errors:
-                message += f". Ошибки: {'; '.join(errors)}"
+                message += f". Errors: {'; '.join(errors)}"
             return {
-                'success': True,
-                'message': message,
-                'active_devices': devices_started,
+                "success": True,
+                "message": message,
+                "active_devices": devices_started,
             }
         else:
             self.is_payment_in_progress = False
             self.target_amount = 0
             self.collected_amount = 0
-            logger.error('Не удалось запустить ни одно устройство')
+            logger.error("Failed to start any payment device")
             return {
-                'success': False,
-                'message': f'Не удалось запустить устройства. Ошибки: {"; ".join(errors)}',
+                "success": False,
+                "message": f"Failed to start devices. Errors: {'; '.join(errors)}",
             }
 
-
-    async def complete_payment(self):
-        """Успешное завершение платежа."""
+    async def complete_payment(self) -> None:
+        """Complete the payment and dispense change if needed."""
         logger.info("=== COMPLETING PAYMENT ===")
-        
-        # Сохраняем значения
+
+        # Store values before reset
         collected = self.collected_amount
         target = self.target_amount
         change = max(0, collected - target)
-        
-        # Сбрасываем флаг платежа ПЕРВЫМ делом
+
+        # Reset payment state first
         self.is_payment_in_progress = False
-        
-        # Останавливаем устройства
+
+        # Stop devices
         if self.BILL_ACCEPTOR_NAME in self.active_devices and self.bill_acceptor:
             try:
                 await self.bill_acceptor.stop_accepting()
-                logger.info("Bill acceptor stopped and reset")
+                logger.info("Bill acceptor stopped")
             except Exception as e:
                 logger.error(f"Error stopping bill acceptor: {e}")
-        
+
         if self.COIN_ACCEPTOR_NAME in self.active_devices:
             try:
                 await self.cctalk_acceptor.disable()
-                logger.info("ccTalk Coin acceptor disabled")
+                logger.info("Coin acceptor disabled")
             except Exception as e:
                 logger.error(f"Error disabling coin acceptor: {e}")
 
-        # Сбрасываем счетчики
+        # Reset counters
         self.target_amount = 0
         self.collected_amount = 0
-        await self.redis.set('collected_amount', 0)
-        await self.redis.set('target_amount', 0)
+        await self.redis.set("collected_amount", 0)
+        await self.redis.set("target_amount", 0)
 
-        logger.info(f"Payment completed: {collected/100} RUB, change: {change/100} RUB")
-        
+        logger.info(f"Payment completed: {collected / 100} RUB, change: {change / 100} RUB")
+
         await send_to_ws(
-            event='successPayment',
-            data={'collected_amount': collected, 'change': change},
+            event="successPayment",
+            data={"collected_amount": collected, "change": change},
         )
 
-        # Выдача сдачи
+        # Dispense change if needed
         if change > 0:
             try:
                 await self.dispense_change(change)
             except Exception as e:
                 logger.error(f"Error dispensing change: {e}")
 
+    async def dispense_change(self, amount: int) -> dict[str, Any]:
+        """
+        Dispense change using bills and coins.
 
-    async def dispense_change(self, amount):
-        """Выдача сдачи."""
+        Args:
+            amount: Amount to dispense in kopecks.
+
+        Returns:
+            Dictionary indicating success and amount dispensed.
+        """
         dispensed_amount = 0
 
-        self.upper_box_value = int(await self.redis.get('bill_dispenser:upper_lvl'))
-        self.lower_box_value = int(await self.redis.get('bill_dispenser:lower_lvl'))
-        # Сначала пробуем выдать купюры
+        self.upper_box_value = int(await self.redis.get("bill_dispenser:upper_lvl") or 0)
+        self.lower_box_value = int(await self.redis.get("bill_dispenser:lower_lvl") or 0)
+
+        # Try dispensing bills first
         if self.BILL_DISPENSER_NAME in self.active_devices and amount >= self.lower_box_value:
             await asyncio.sleep(0.5)
             try:
-                # Определяем какой номинал больше
+                # Determine which denomination is higher
                 higher_box_value = max(self.upper_box_value, self.lower_box_value)
                 lower_box_value = min(self.upper_box_value, self.lower_box_value)
 
-                # Сначала используем больший номинал, затем меньший
+                # Use higher denomination first, then lower
                 higher_bills = int(amount // higher_box_value)
                 lower_bills = int((amount % higher_box_value) // lower_box_value)
 
                 if higher_bills > 0 or lower_bills > 0:
-                    # В зависимости от того, какой номинал был больше, передаем параметры в правильном порядке
+                    # Determine correct order for dispenser
                     if self.upper_box_value > self.lower_box_value:
                         result = self.bill_dispenser.upperLowerDispense(higher_bills, lower_bills)
                     else:
                         result = self.bill_dispenser.upperLowerDispense(lower_bills, higher_bills)
 
-                    upper_exit, lower_exit, upper_rejected, lower_rejected, upper_check, lower_check = result
+                    upper_exit, lower_exit = result[0], result[1]
 
-                    dispensed_amount = (upper_exit * self.upper_box_value + lower_exit * self.lower_box_value)
+                    dispensed_amount = (
+                        upper_exit * self.upper_box_value +
+                        lower_exit * self.lower_box_value
+                    )
                     amount -= dispensed_amount
 
-                    upper_count = int(await self.redis.get('bill_dispenser:upper_count'))
-                    lower_count = int(await self.redis.get('bill_dispenser:lower_count'))
-                    new_upper = upper_count - upper_exit
-                    new_lower = lower_count - lower_exit
-                    await self.redis.set('bill_dispenser:upper_count', new_upper)
-                    await self.redis.set('bill_dispenser:lower_count', new_lower)
+                    # Update Redis counts
+                    upper_count = int(await self.redis.get("bill_dispenser:upper_count") or 0)
+                    lower_count = int(await self.redis.get("bill_dispenser:lower_count") or 0)
+                    await self.redis.set("bill_dispenser:upper_count", upper_count - upper_exit)
+                    await self.redis.set("bill_dispenser:lower_count", lower_count - lower_exit)
 
             except Exception as e:
-                logger.error(f'Ошибка при выдаче купюр: {e}')
+                logger.error(f"Error dispensing bills: {e}")
                 return {
-                    'success': False,
-                    'message': f'Ошибка при выдаче купюр: {e}',
+                    "success": False,
+                    "message": f"Error dispensing bills: {e}",
                 }
 
-        # Даем небольшую паузу перед использованием другого устройства
+        # Pause between devices
         await asyncio.sleep(1.0)
 
-        # Для выдачи сдачи монетами используем старый хоппер
+        # Dispense remaining as coins
         if self.COIN_DISPENSER_NAME in self.active_devices and amount > 0:
             try:
                 self.hopper.open(COIN_ACCEPTOR_PORT, PORT_OPTIONS)
                 await self.hopper.enable()
-                await self.hopper.command('SYNC')
+                await self.hopper.command("SYNC")
 
-                big_coin_priority = await self.redis.get('settings:big_coin_priority')
+                big_coin_priority = await self.redis.get("settings:big_coin_priority")
 
                 if not big_coin_priority:
-                    # Старая логика: выдаем общую сумму
+                    # Simple payout
                     coins_to_dispense = int(amount)
-                    result = await self.hopper.command('PAYOUT_AMOUNT', {
-                        'amount': coins_to_dispense,
-                        'country_code': 'RUB',
-                        'test': False
+                    result = await self.hopper.command("PAYOUT_AMOUNT", {
+                        "amount": coins_to_dispense,
+                        "country_code": "RUB",
+                        "test": False,
                     })
                     if result.get("success"):
                         dispensed_amount += amount
                         amount = 0
                     else:
                         logger.error(f"Coin payout failed: {result.get('error', 'Unknown error')}")
-
                 else:
-                    # Новая логика: выдача по номиналам
-                    all_levels = await self.hopper.command('GET_ALL_LEVELS')
-                    if not all_levels.get('success'):
+                    # Denomination-based payout
+                    all_levels = await self.hopper.command("GET_ALL_LEVELS")
+                    if not all_levels.get("success"):
                         raise Exception("Could not get coin levels from hopper")
 
-                    coin_data_dict = all_levels.get('info', {}).get('counter', {})
-                    
-                    # Фильтруем и сортируем монеты: только те, что есть в наличии, по убыванию номинала
+                    coin_data_dict = all_levels.get("info", {}).get("counter", {})
+
+                    # Sort coins by value descending
                     available_coins = sorted(
-                        [coin for coin in coin_data_dict.values() if coin.get('denomination_level', 0) > 0],
-                        key=lambda x: x.get('value', 0),
-                        reverse=True
+                        [c for c in coin_data_dict.values() if c.get("denomination_level", 0) > 0],
+                        key=lambda x: x.get("value", 0),
+                        reverse=True,
                     )
-                    
+
                     payout_list = []
                     remaining_amount = int(amount)
 
                     for coin in available_coins:
-                        coin_value = coin['value']
-                        coin_count = coin['denomination_level']
-                        
+                        coin_value = coin["value"]
+                        coin_count = coin["denomination_level"]
+
                         if remaining_amount >= coin_value:
                             num_to_dispense = min(remaining_amount // coin_value, coin_count)
                             if num_to_dispense > 0:
                                 payout_list.append({
-                                    'number': num_to_dispense,
-                                    'denomination': coin_value,
-                                    'country_code': 'RUB'
+                                    "number": num_to_dispense,
+                                    "denomination": coin_value,
+                                    "country_code": "RUB",
                                 })
                                 remaining_amount -= num_to_dispense * coin_value
 
                     if payout_list:
-                        result = await self.hopper.command('PAYOUT_BY_DENOMINATION', {
-                            'value': payout_list,
-                            'test': False
+                        result = await self.hopper.command("PAYOUT_BY_DENOMINATION", {
+                            "value": payout_list,
+                            "test": False,
                         })
-                        
+
                         if result.get("success"):
                             dispensed_in_coins = amount - remaining_amount
                             dispensed_amount += dispensed_in_coins
                             amount -= dispensed_in_coins
                         else:
-                            logger.error(f"Payout by denomination failed: {result.get('error', 'Unknown error')}")
+                            logger.error(f"Denomination payout failed: {result.get('error')}")
                     else:
-                        logger.warning("No coins available to make change for the required amount.")
-
+                        logger.warning("No coins available for requested amount")
 
             except Exception as e:
-                logger.error(f"Ошибка при выдаче монет: {str(e)}")
+                logger.error(f"Error dispensing coins: {e}")
             finally:
-                # Всегда отключаем хоппер после операции
                 await self.hopper.disable()
                 if self.hopper.port and self.hopper.port.is_open:
                     await self.hopper.close()
 
         if amount > 0:
-            logger.info(f"Остаток не выданной сдачи: {amount / 100} RUB")
+            logger.info(f"Remaining undispensed change: {amount / 100} RUB")
 
         if dispensed_amount > 0:
-            logger.info(f"Выдано сдачи: {dispensed_amount / 100} RUB, невыданный остаток: {amount / 100}")
+            logger.info(f"Change dispensed: {dispensed_amount / 100} RUB")
             return {
-                'success': True,
-                'message': 'Сдача выдана успешно',
+                "success": True,
+                "message": "Change dispensed successfully",
             }
         else:
-            logger.info("Сдача не выдана")
+            logger.info("No change dispensed")
             return {
-                'success': False,
-                'message': 'Сдача не выдана',
+                "success": False,
+                "message": "No change dispensed",
             }
 
-
-    async def shutdown(self):
-        """Завершение работы с устройствами."""
+    async def shutdown(self) -> None:
+        """Shut down all devices and clean up resources."""
         try:
             if self.COIN_ACCEPTOR_NAME in self.active_devices:
                 await self.cctalk_acceptor.disable()
@@ -746,6 +872,6 @@ class PaymentSystemAPI:
             # Stop event consumer
             await self.event_consumer.stop_consuming()
 
-            logger.info("Платежная система выключена успешно")
+            logger.info("Payment system shut down successfully")
         except Exception as e:
-            logger.error(f"Ошибка выключения платежной системы: {e}")
+            logger.error(f"Error during shutdown: {e}")

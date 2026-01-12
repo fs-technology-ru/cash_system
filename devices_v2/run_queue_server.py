@@ -1,102 +1,150 @@
+"""
+Redis queue server for the cash payment system.
+
+This module provides the main entry point for the cash system service,
+handling Redis pub/sub communication and command processing.
+"""
+
 import asyncio
+import json
+from typing import Any, Final
 
 from redis.asyncio import Redis
-import json
 
 from configs import REDIS_PORT, REDIS_HOST
-from payment_system_api import PaymentSystemAPI
 from loggers import logger
+from payment_system_api import PaymentSystemAPI
 from payment_system_cash_commands import payment_system_cash_commands
 
 
-async def listen_to_redis(redis, api):
-    """Подключение к Redis и обработка команд"""
+# =============================================================================
+# Constants
+# =============================================================================
+
+COMMAND_CHANNEL: Final[str] = "payment_system_cash_commands"
+RESPONSE_CHANNEL: Final[str] = f"{COMMAND_CHANNEL}_response"
+
+# Default Redis settings
+DEFAULT_SETTINGS: Final[dict[str, dict[str, Any]]] = {
+    "max_bill_count": {"key": "max_bill_count", "default": 1450},
+    "bill_count": {"key": "bill_count", "default": 0},
+    "upper_count": {"key": "bill_dispenser:upper_count", "default": 0},
+    "lower_count": {"key": "bill_dispenser:lower_count", "default": 0},
+    "upper_lvl": {"key": "bill_dispenser:upper_lvl", "default": 10000},
+    "lower_lvl": {"key": "bill_dispenser:lower_lvl", "default": 5000},
+}
+
+AVAILABLE_DEVICES: Final[set[str]] = {
+    "bill_acceptor",
+    "bill_dispenser",
+    "coin_dispenser",
+    "coin_acceptor",
+}
+
+
+# =============================================================================
+# Redis Command Listener
+# =============================================================================
+
+async def listen_to_redis(redis: Redis, api: PaymentSystemAPI) -> None:
+    """
+    Listen for commands on Redis pub/sub and process them.
+
+    Args:
+        redis: Redis client instance.
+        api: PaymentSystemAPI instance for command execution.
+    """
     try:
         await api.init_devices()
     except Exception as e:
-        logger.error(f"Critical error: {e}")
+        logger.error(f"Critical error during device initialization: {e}")
         await api.shutdown()
         return
 
     pubsub = redis.pubsub()
+    await pubsub.subscribe(COMMAND_CHANNEL)
+    logger.info(f"Listening for commands on channel: {COMMAND_CHANNEL}")
 
-    # Подписка на канал команд
-    channel = 'payment_system_cash_commands'
-    channel_response = f'{channel}_response'
-    await pubsub.subscribe(channel)
-    logger.info("Ожидание команд...")
-
-    # Слушаем канал и выполняем команды
     async for message in pubsub.listen():
-        if message.get('type') == 'message':
-            raw_data = message.get("data")
+        if message.get("type") != "message":
+            continue
 
-            # обработка пинга
-            if raw_data == "ping":
-                continue
-            try:
-                command = json.loads(raw_data)
-                logger.info(f"Получена команда: {command}")
+        raw_data = message.get("data")
 
-                response = await payment_system_cash_commands(command, api)
+        # Handle ping messages
+        if raw_data == "ping":
+            continue
 
-                await redis.publish(channel_response, json.dumps(response))
-                logger.info(f"[{channel}] Ответ отправлен в {channel_response}: {response}")
-            except json.JSONDecodeError as e:
-                logger.error(f"Ошибка парсинга команды: {e}")
-            except Exception as e:
-                logger.error(f"Неожиданная ошибка: {e}")
+        try:
+            command = json.loads(raw_data)
+            logger.info(f"Received command: {command}")
 
+            response = await payment_system_cash_commands(command, api)
 
-async def pre_settings(redis: Redis):
-    max_bill_count = await redis.get('max_bill_count')
-    bill_count = await redis.get('bill_count')
-    if max_bill_count is None:
-        max_bill_count = 1450
-        await redis.set('max_bill_count', max_bill_count)
-    if bill_count is None:
-        bill_count = 0
-        await redis.set('bill_count', bill_count)
+            await redis.publish(RESPONSE_CHANNEL, json.dumps(response))
+            logger.info(f"Response sent to {RESPONSE_CHANNEL}: {response}")
 
-    upper_box_count = await redis.get('bill_dispenser:upper_count')
-    lower_box_count = await redis.get('bill_dispenser:lower_count')
-    if upper_box_count is None:
-        upper_box_count = 0
-        await redis.set('bill_dispenser:upper_count', upper_box_count)
-    if lower_box_count is None:
-        lower_box_count = 0
-        await redis.set('bill_dispenser:lower_count', lower_box_count)
-
-    upper_lvl = await redis.get('bill_dispenser:upper_lvl')
-    lower_lvl = await redis.get('bill_dispenser:lower_lvl')
-    if upper_lvl is None:
-        await redis.set('bill_dispenser:upper_lvl', 10000)
-    if lower_lvl is None:
-        await redis.set('bill_dispenser:lower_lvl', 5000)
-
-    available_devices_cash = await redis.smembers("available_devices_cash")
-    if not available_devices_cash:
-        await redis.sadd(
-            "available_devices_cash",
-            'bill_acceptor',
-            'bill_dispenser',
-            'coin_dispenser',
-            'coin_acceptor',
-        )
+        except json.JSONDecodeError as e:
+            logger.error(f"Command parsing error: {e}")
+        except Exception as e:
+            logger.error(f"Unexpected error processing command: {e}")
 
 
-async def main():
-    redis = Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+# =============================================================================
+# Pre-initialization Settings
+# =============================================================================
+
+async def initialize_redis_settings(redis: Redis) -> None:
+    """
+    Initialize default Redis settings if they don't exist.
+
+    Args:
+        redis: Redis client instance.
+    """
+    for setting in DEFAULT_SETTINGS.values():
+        key = setting["key"]
+        default = setting["default"]
+
+        current_value = await redis.get(key)
+        if current_value is None:
+            await redis.set(key, default)
+            logger.debug(f"Initialized {key} = {default}")
+
+    # Initialize available devices set
+    available_devices = await redis.smembers("available_devices_cash")
+    if not available_devices:
+        await redis.sadd("available_devices_cash", *AVAILABLE_DEVICES)
+        logger.debug(f"Initialized available_devices_cash: {AVAILABLE_DEVICES}")
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+async def main() -> None:
+    """
+    Main entry point for the cash system service.
+
+    Initializes Redis connection, applies default settings, and starts
+    the command listener.
+    """
+    redis = Redis(
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        decode_responses=True,
+    )
+
     payment_api = PaymentSystemAPI(redis)
 
-    # Сначала применяем настройки
-    await pre_settings(redis)
+    # Initialize default settings
+    await initialize_redis_settings(redis)
 
-    # Потом запускаем слушатель команд
+    # Start command listener
     await listen_to_redis(redis, payment_api)
+
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Остановка приложения...")
+        logger.info("Application stopped by user")
