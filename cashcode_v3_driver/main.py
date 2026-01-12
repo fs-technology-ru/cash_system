@@ -6,7 +6,7 @@ This script demonstrates how to use the CashCodeDriver class
 to communicate with a Creator C100-B20 or compatible bill validator.
 
 Usage:
-    python main.py [--port /dev/ttyUSB0] [--baudrate 9600]
+    python main.py [--port /dev/ttyUSB0] [--baudrate 9600] [--debug]
 """
 
 import asyncio
@@ -15,11 +15,6 @@ import logging
 import signal
 from ccnet import CashCodeDriver, EventType, StateContext, get_state_name
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-)
 logger = logging.getLogger(__name__)
 
 
@@ -132,11 +127,25 @@ def parse_args():
         default=9600,
         help='Serial baudrate',
     )
+    parser.add_argument(
+        '--debug', '-d',
+        action='store_true',
+        help='Enable debug logging (shows HEX dump of all TX/RX packets)',
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
+    
+    # Configure logging level based on --debug flag
+    log_level = logging.DEBUG if args.debug else logging.INFO
+    logging.basicConfig(
+        level=log_level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        force=True,
+    )
+    
     try:
         asyncio.run(main(args.port, args.baudrate))
     except KeyboardInterrupt:

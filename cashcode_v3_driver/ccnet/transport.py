@@ -156,7 +156,8 @@ class CCNETTransport:
             packet: Packet to send.
         """
         data = packet.to_bytes()
-        logger.debug(f"TX: {data.hex(' ')}")
+        hex_str = ' '.join(f'{b:02X}' for b in data)
+        logger.debug(f"TX: {hex_str}")
         
         async with self._lock:
             self._writer.write(data)
@@ -267,7 +268,8 @@ class CCNETTransport:
             
             # Combine and parse
             complete_data = header + remaining
-            logger.debug(f"RX: {complete_data.hex(' ')}")
+            hex_str = ' '.join(f'{b:02X}' for b in complete_data)
+            logger.debug(f"RX: {hex_str}")
             
             return CCNETPacket.from_bytes(complete_data)
             

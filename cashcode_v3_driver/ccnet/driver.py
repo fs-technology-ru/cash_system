@@ -322,6 +322,12 @@ class CashCodeDriver:
         """
         Enable bill acceptance and start polling loop.
         
+        Follows the initialization sequence from PDF page 53:
+        1. Send RESET (30H)
+        2. Wait for POLL -> POWER_UP / INITIALIZE
+        3. Send SET SECURITY (32H)
+        4. Send ENABLE BILL TYPES (34H)
+        
         Returns:
             True if enabled successfully.
         """
@@ -335,9 +341,51 @@ class CashCodeDriver:
         
         logger.info("Enabling bill acceptance...")
         
-        # Enable all bill types
-        result = await self._protocol.enable_bill_types()
-        if not result:
+        # Step 1: Send RESET command
+        logger.info("Step 1: Sending RESET command...")
+        reset_result = await self._protocol.reset()
+        if not reset_result:
+            logger.warning("RESET command got no response, continuing anyway...")
+        
+        # Step 2: Wait for POWER_UP or INITIALIZE state
+        logger.info("Step 2: Waiting for device initialization...")
+        max_init_polls = 50  # Max polls to wait for initialization (~10 seconds)
+        initialized = False
+        
+        for i in range(max_init_polls):
+            response = await self._protocol.poll()
+            if response:
+                logger.debug(f"Poll response during init: {response.state_name} (0x{response.state:02X})")
+                
+                # Check if device is ready (IDLING or UNIT_DISABLED means ready)
+                if response.state in (DeviceState.IDLING, DeviceState.UNIT_DISABLED):
+                    initialized = True
+                    logger.info(f"Device ready, state: {response.state_name}")
+                    break
+                
+                # Still initializing, wait and continue polling
+                if response.state in (DeviceState.POWER_UP, DeviceState.INITIALIZE,
+                                     DeviceState.POWER_UP_WITH_BILL_IN_VALIDATOR,
+                                     DeviceState.POWER_UP_WITH_BILL_IN_STACKER):
+                    await asyncio.sleep(0.2)
+                    continue
+            
+            await asyncio.sleep(0.2)
+        
+        if not initialized:
+            logger.warning("Device did not reach IDLING state, attempting to continue...")
+        
+        # Step 3: Send SET SECURITY command (PDF page 18)
+        logger.info("Step 3: Sending SET SECURITY command...")
+        security_result = await self._protocol.set_security()
+        if not security_result:
+            logger.error("Failed to set security")
+            return False
+        
+        # Step 4: Send ENABLE BILL TYPES command (PDF page 20)
+        logger.info("Step 4: Sending ENABLE BILL TYPES command...")
+        enable_result = await self._protocol.enable_bill_types()
+        if not enable_result:
             logger.error("Failed to enable bill types")
             return False
         
@@ -347,7 +395,7 @@ class CashCodeDriver:
         self._stop_event.clear()
         self._poll_task = asyncio.create_task(self._poll_loop())
         
-        logger.info("Bill acceptance enabled")
+        logger.info("Bill acceptance enabled successfully")
         return True
     
     async def disable_validator(self) -> bool:
