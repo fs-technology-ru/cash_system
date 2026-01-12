@@ -220,7 +220,7 @@ class CashCodeDriver:
         """
         Connect to the bill validator.
         
-        Opens serial port and initializes communication.
+        Opens serial port, sends RESET, and waits for device to initialize.
         
         Returns:
             True if connection successful.
@@ -250,6 +250,31 @@ class CashCodeDriver:
                 return False
             
             logger.info(f"Device connected, initial state: {response.state_name}")
+            
+            # Send RESET and wait for device to be ready
+            logger.info("Sending RESET command...")
+            await self._protocol.reset()
+            
+            # Wait for device to complete initialization
+            logger.info("Waiting for device initialization...")
+            max_init_polls = 50  # Max polls (~10 seconds)
+            initialized = False
+            
+            for _ in range(max_init_polls):
+                response = await self._protocol.poll()
+                if response:
+                    logger.debug(f"Init poll: {response.state_name} (0x{response.state:02X})")
+                    
+                    # Device is ready when in IDLING or UNIT_DISABLED state
+                    if response.state in (DeviceState.IDLING, DeviceState.UNIT_DISABLED):
+                        initialized = True
+                        logger.info(f"Device ready, state: {response.state_name}")
+                        break
+                
+                await asyncio.sleep(0.2)
+            
+            if not initialized:
+                logger.warning("Device did not reach ready state, continuing anyway...")
             
             self._connected = True
             self._stop_event.clear()
@@ -322,6 +347,12 @@ class CashCodeDriver:
         """
         Enable bill acceptance and start polling loop.
         
+        Follows the initialization sequence from PDF page 53:
+        1. Send SET SECURITY (32H)
+        2. Send ENABLE BILL TYPES (34H)
+        
+        Note: RESET is done in connect(), so we skip it here.
+        
         Returns:
             True if enabled successfully.
         """
@@ -335,9 +366,17 @@ class CashCodeDriver:
         
         logger.info("Enabling bill acceptance...")
         
-        # Enable all bill types
-        result = await self._protocol.enable_bill_types()
-        if not result:
+        # Send SET SECURITY command (PDF page 18)
+        logger.info("Sending SET SECURITY command...")
+        security_result = await self._protocol.set_security()
+        if not security_result:
+            logger.error("Failed to set security")
+            return False
+        
+        # Send ENABLE BILL TYPES command (PDF page 20)
+        logger.info("Sending ENABLE BILL TYPES command...")
+        enable_result = await self._protocol.enable_bill_types()
+        if not enable_result:
             logger.error("Failed to enable bill types")
             return False
         
@@ -347,7 +386,37 @@ class CashCodeDriver:
         self._stop_event.clear()
         self._poll_task = asyncio.create_task(self._poll_loop())
         
-        logger.info("Bill acceptance enabled")
+        logger.info("Bill acceptance enabled successfully")
+        return True
+    
+    async def _re_enable_bill_types(self) -> bool:
+        """
+        Re-enable bill types after device goes to UNIT_DISABLED.
+        
+        This is called automatically when the device transitions to
+        UNIT_DISABLED during the polling loop (e.g., after a bill rejection).
+        
+        Returns:
+            True if re-enabled successfully.
+        """
+        if not self._protocol:
+            return False
+        
+        logger.info("Re-enabling bill types after UNIT_DISABLED...")
+        
+        # Send SET SECURITY command
+        security_result = await self._protocol.set_security()
+        if not security_result:
+            logger.error("Failed to re-set security")
+            return False
+        
+        # Send ENABLE BILL TYPES command
+        enable_result = await self._protocol.enable_bill_types()
+        if not enable_result:
+            logger.error("Failed to re-enable bill types")
+            return False
+        
+        logger.info("Bill types re-enabled successfully")
         return True
     
     async def disable_validator(self) -> bool:
@@ -463,11 +532,14 @@ class CashCodeDriver:
         """
         Handle a poll response.
         
-        Updates state machine and handles escrow auto-stacking.
+        Updates state machine, handles escrow auto-stacking, and
+        automatically re-enables bill types when device goes to UNIT_DISABLED.
         
         Args:
             response: Poll response from device.
         """
+        previous_state = self._state_machine.current_state
+        
         # Update state machine
         await self._state_machine.process_state(response.state, response.data)
         
@@ -476,10 +548,19 @@ class CashCodeDriver:
             self._auto_stack
             and self._accepting_enabled
             and response.state == DeviceState.ESCROW_POSITION
-            and self._state_machine.previous_state != DeviceState.ESCROW_POSITION
+            and previous_state != DeviceState.ESCROW_POSITION
         ):
             logger.debug("Auto-stacking bill")
             await self._protocol.stack()
+        
+        # Auto re-enable if device goes to UNIT_DISABLED while we should be accepting
+        if (
+            self._accepting_enabled
+            and response.state == DeviceState.UNIT_DISABLED
+            and previous_state not in (None, DeviceState.UNIT_DISABLED)
+        ):
+            logger.info("Device went to UNIT_DISABLED, re-enabling bill types...")
+            await self._re_enable_bill_types()
     
     async def get_status(self) -> Optional[bytes]:
         """

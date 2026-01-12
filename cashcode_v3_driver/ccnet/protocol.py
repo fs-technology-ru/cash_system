@@ -130,40 +130,79 @@ class CCNETProtocol:
             is_nak=(state == Command.NAK),
         )
     
-    async def enable_bill_types(
+    async def set_security(
         self,
-        bill_mask: int = 0xFFFFFF,
-        security_mask: int = 0,
+        security_mask: int = 0xFFFFFF,
     ) -> bool:
         """
-        Send ENABLE BILL TYPES command.
+        Send SET SECURITY command (0x32).
         
-        Enables acceptance of specified bill types.
+        Sets security level for bill validation. Per PDF page 18,
+        this command requires 3 data bytes (Y1-Y3).
         
         Args:
-            bill_mask: 3-byte mask of enabled bill types (default all).
-            security_mask: 3-byte security mask (default none).
+            security_mask: 3-byte security mask (default 0xFFFFFF for high security on all bills).
             
         Returns:
             True if command acknowledged.
         """
-        # Build data: 3 bytes bill mask + 3 bytes security mask
+        # Build data: 3 bytes security mask (Y1-Y3)
         data = bytes([
-            (bill_mask >> 0) & 0xFF,
-            (bill_mask >> 8) & 0xFF,
-            (bill_mask >> 16) & 0xFF,
-            (security_mask >> 0) & 0xFF,
-            (security_mask >> 8) & 0xFF,
-            (security_mask >> 16) & 0xFF,
+            (security_mask >> 0) & 0xFF,   # Y1
+            (security_mask >> 8) & 0xFF,   # Y2
+            (security_mask >> 16) & 0xFF,  # Y3
         ])
         
-        logger.info(f"Enabling bill types: mask=0x{bill_mask:06X}")
+        logger.info(f"Setting security: mask=0x{security_mask:06X}")
+        await self._transport.send_command(Command.SET_SECURITY, data)
+        
+        response = await self._transport.receive_packet()
+        if response:
+            logger.debug(f"SET SECURITY response: 0x{response.command:02X}")
+            return True
+        
+        logger.warning("No response to SET SECURITY")
+        return False
+
+    async def enable_bill_types(
+        self,
+        bill_enable_mask: int = 0xFFFFFF,
+        escrow_enable_mask: int = 0xFFFFFF,
+    ) -> bool:
+        """
+        Send ENABLE BILL TYPES command (0x34).
+        
+        Enables acceptance of specified bill types. Per PDF page 20,
+        this command requires 6 data bytes:
+        - Y1-Y3: Bill enable mask
+        - Y4-Y6: Escrow enable mask
+        
+        Args:
+            bill_enable_mask: 3-byte mask of enabled bill types (default all).
+            escrow_enable_mask: 3-byte mask for escrow enabled bills (default all).
+            
+        Returns:
+            True if command acknowledged.
+        """
+        # Build data: 3 bytes bill enable mask (Y1-Y3) + 3 bytes escrow enable mask (Y4-Y6)
+        data = bytes([
+            (bill_enable_mask >> 0) & 0xFF,    # Y1
+            (bill_enable_mask >> 8) & 0xFF,    # Y2
+            (bill_enable_mask >> 16) & 0xFF,   # Y3
+            (escrow_enable_mask >> 0) & 0xFF,  # Y4
+            (escrow_enable_mask >> 8) & 0xFF,  # Y5
+            (escrow_enable_mask >> 16) & 0xFF, # Y6
+        ])
+        
+        logger.info(f"Enabling bill types: bill_mask=0x{bill_enable_mask:06X}, escrow_mask=0x{escrow_enable_mask:06X}")
         await self._transport.send_command(Command.ENABLE_BILL_TYPES, data)
         
         response = await self._transport.receive_packet()
         if response:
+            logger.debug(f"ENABLE BILL TYPES response: 0x{response.command:02X}")
             return True
         
+        logger.warning("No response to ENABLE BILL TYPES")
         return False
     
     async def disable_bill_types(self) -> bool:
@@ -173,7 +212,7 @@ class CCNETProtocol:
         Returns:
             True if command acknowledged.
         """
-        return await self.enable_bill_types(bill_mask=0, security_mask=0)
+        return await self.enable_bill_types(bill_enable_mask=0, escrow_enable_mask=0)
     
     async def stack(self) -> bool:
         """
