@@ -146,6 +146,15 @@ STATE_NAMES: dict[int, str] = {
     state.value: state.name for state in DeviceState
 }
 
+# States that require ACK acknowledgment from host controller.
+# Per CCNET Protocol Description page 20:
+# "* - State will be reported until it's read by Host controller (a valid ACK received by Bill-To-Bill unit)."
+STATES_REQUIRING_ACK: set[int] = {
+    DeviceState.BILL_STACKED,      # 0x81 - Bill has been stacked
+    DeviceState.BILL_RETURNED,     # 0x82 - Bill has been returned
+    DeviceState.CHEATED,           # 0x45 - Cheating attempt detected
+}
+
 
 def get_state_name(state_code: int | None) -> str:
     """Get human-readable state name from state code."""
