@@ -1,0 +1,16 @@
+[Unit]
+Description=Cash System
+After=network.target docker.service
+
+[Service]
+Type=simple
+User=fsadmin
+WorkingDirectory=/home/fsadmin/kso_modular_backend/devices/cash_system/devices_v2
+ExecStart=/home/fsadmin/.local/bin/uv run /home/fsadmin/kso_modular_backend/devices/cash_system/devices_v2/run_queue_server.py
+Restart=on-failure
+Environment="PYTHONUNBUFFERED=1"
+ExecStartPre=/bin/sleep 5
+
+[Install]
+WantedBy=multi-user.target
+
