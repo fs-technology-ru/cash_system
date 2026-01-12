@@ -31,6 +31,7 @@ from .constants import (
     BILL_DENOMINATIONS,
     DEFAULT_DEVICE_ADDRESS,
     POLL_INTERVAL_MS,
+    STATES_REQUIRING_ACK,
     get_state_name,
     get_bill_amount,
 )
@@ -70,6 +71,7 @@ __all__ = [
     'BILL_DENOMINATIONS',
     'DEFAULT_DEVICE_ADDRESS',
     'POLL_INTERVAL_MS',
+    'STATES_REQUIRING_ACK',
     
     # Utility functions
     'get_state_name',

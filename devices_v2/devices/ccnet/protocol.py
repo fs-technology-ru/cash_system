@@ -18,6 +18,7 @@ from .constants import (
     DeviceState,
     DEFAULT_DEVICE_ADDRESS,
     POLL_INTERVAL_MS,
+    STATES_REQUIRING_ACK,
     get_state_name,
 )
 from .transport import CCNETTransport, CCNETPacket
@@ -110,6 +111,12 @@ class CCNETProtocol:
         """
         Send POLL command and parse response.
         
+        Per CCNET Protocol Description page 13:
+        "The Controller must respond to data from a Peripheral with an Acknowledgment (ACK)"
+        
+        Per page 20, states marked with * (BILL_STACKED, BILL_RETURNED, CHEATED, etc.)
+        will be reported repeatedly until ACK is received by the device.
+        
         Returns:
             Parsed poll response or None on error.
         """
@@ -123,6 +130,15 @@ class CCNETProtocol:
         state = response.command  # State code is in command byte
         data = response.data
         
+        # Send ACK for event states that require acknowledgment
+        # Per CCNET protocol, these states will repeat until ACK is sent
+        if state in STATES_REQUIRING_ACK:
+            logger.debug(f"Sending ACK for event state: {get_state_name(state)}")
+            try:
+                await self.send_ack()
+            except Exception as e:
+                logger.warning(f"Failed to send ACK for {get_state_name(state)}: {e}")
+        
         return PollResponse(
             state=state,
             data=data,
@@ -130,6 +146,40 @@ class CCNETProtocol:
             is_nak=(state == Command.NAK),
         )
     
+    async def set_security(
+        self,
+        security_mask: int = 0xFFFFFF,
+    ) -> bool:
+        """
+        Send SET SECURITY command (0x32).
+        
+        Sets security level for bill validation. Per PDF page 18,
+        this command requires 3 data bytes (Y1-Y3).
+        
+        Args:
+            security_mask: 3-byte security mask (default 0xFFFFFF for high security on all bills).
+            
+        Returns:
+            True if command acknowledged.
+        """
+        # Build data: 3 bytes security mask (Y1-Y3)
+        data = bytes([
+            (security_mask >> 0) & 0xFF,   # Y1
+            (security_mask >> 8) & 0xFF,   # Y2
+            (security_mask >> 16) & 0xFF,  # Y3
+        ])
+        
+        logger.info(f"Setting security: mask=0x{security_mask:06X}")
+        await self._transport.send_command(Command.SET_SECURITY, data)
+        
+        response = await self._transport.receive_packet()
+        if response:
+            logger.debug(f"SET SECURITY response: 0x{response.command:02X}")
+            return True
+        
+        logger.warning("No response to SET SECURITY")
+        return False
+
     async def enable_bill_types(
         self,
         bill_mask: int = 0xFFFFFF,
