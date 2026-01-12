@@ -33,7 +33,12 @@ from loggers import logger
 # Load command definitions
 # =============================================================================
 
+# Use relative path from this file's location
 STATIC_PATH = Path(__file__).parent.parent.parent / "static" / "commands.json"
+if not STATIC_PATH.exists():
+    # Fallback to working directory
+    STATIC_PATH = Path("static/commands.json")
+
 with open(STATIC_PATH, "r") as f:
     command_list = json.load(f)
 

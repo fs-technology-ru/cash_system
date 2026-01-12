@@ -128,6 +128,10 @@ class TTY:
 
         Returns:
             Bytes read from port.
+
+        Note:
+            Uses select.select() for polling which is Unix-compatible.
+            On Windows, pyserial's timeout-based reading is used as fallback.
         """
         if not self.IsOK():
             raise LcdmException("Error. Port not open")
@@ -137,6 +141,7 @@ class TTY:
         timeout_sec = 2
 
         while attempt:
+            # Note: select.select() works on Unix; Windows uses pyserial timeout
             r, _, _ = select.select([self._serial], [], [], timeout_sec)
             if r:
                 try:

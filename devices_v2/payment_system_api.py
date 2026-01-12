@@ -144,7 +144,7 @@ class PaymentSystemAPI:
             value: Maximum number of bills the acceptor can hold.
         """
         await self.redis.set("max_bill_count", value)
-        await self.init_bill_acceptor()
+        await self._init_bill_acceptor()
 
     @redis_error_handler("Bill count reset successfully")
     async def bill_acceptor_reset_bill_count(self) -> None:
@@ -367,18 +367,18 @@ class PaymentSystemAPI:
         Returns:
             Dictionary indicating initialization success.
         """
-        is_hopper = await self.init_ssp_hopper()
+        is_hopper = await self._init_ssp_hopper()
         if is_hopper:
             self.active_devices.add(self.COIN_DISPENSER_NAME)
 
-        is_coin = await self.init_cctalk_coin_acceptor()
+        is_coin = await self._init_cctalk_coin_acceptor()
         if is_coin:
             self.active_devices.add(self.COIN_ACCEPTOR_NAME)
 
-        await self.init_bill_acceptor()
-        await self.init_bill_dispenser()
+        await self._init_bill_acceptor()
+        await self._init_bill_dispenser()
 
-        self.register_event_handlers()
+        self._register_event_handlers()
         asyncio.create_task(self.event_consumer.start_consuming())
 
         available_devices = await self.redis.smembers("available_devices_cash")
@@ -397,7 +397,7 @@ class PaymentSystemAPI:
                 "message": f"Failed to initialize devices: {missing}",
             }
 
-    async def init_ssp_hopper(self) -> bool:
+    async def _init_ssp_hopper(self) -> bool:
         """
         Initialize the SSP hopper for coin dispensing.
 
@@ -424,7 +424,7 @@ class PaymentSystemAPI:
             if self.hopper.port and self.hopper.port.is_open:
                 await self.hopper.close()
 
-    async def init_cctalk_coin_acceptor(self) -> bool:
+    async def _init_cctalk_coin_acceptor(self) -> bool:
         """
         Initialize the ccTalk coin acceptor.
 
@@ -442,20 +442,26 @@ class PaymentSystemAPI:
             logger.error(f"Failed to initialize ccTalk coin acceptor: {e}")
             return False
 
-    async def init_bill_acceptor(self) -> None:
-        """Initialize the bill acceptor based on firmware version."""
-        bill_acceptor_firmware = await self.redis.get("bill_acceptor_firmware")
+    async def _init_bill_acceptor(self) -> None:
+        """
+        Initialize the bill acceptor based on firmware version.
 
-        if bill_acceptor_firmware == "v1":
-            self.bill_acceptor = bill_acceptor_v1.BillAcceptor(
+        Note: v2 and v3 firmware use the same BillAcceptor class (bill_acceptor_v3)
+        as they share the same CCNET protocol implementation.
+        """
+        firmware_version = await self.redis.get("bill_acceptor_firmware")
+
+        if firmware_version == "v1":
+            self._bill_acceptor = bill_acceptor_v1.BillAcceptor(
                 bill_acceptor_config.BILL_ACCEPTOR_PORT,
-                self.event_publisher,
+                self._event_publisher,
                 self.redis,
             )
-        elif bill_acceptor_firmware in ("v2", "v3"):
-            self.bill_acceptor = bill_acceptor_v3.BillAcceptor(
+        elif firmware_version in ("v2", "v3"):
+            # Both v2 and v3 use the same improved CCNET driver
+            self._bill_acceptor = bill_acceptor_v3.BillAcceptor(
                 bill_acceptor_config.BILL_ACCEPTOR_PORT,
-                self.event_publisher,
+                self._event_publisher,
                 self.redis,
             )
 
@@ -472,7 +478,7 @@ class PaymentSystemAPI:
         except Exception as e:
             logger.error(f"Failed to initialize bill acceptor: {e}")
 
-    async def init_bill_dispenser(self) -> None:
+    async def _init_bill_dispenser(self) -> None:
         """Initialize the bill dispenser."""
         try:
             self.bill_dispenser.connect(BILL_DISPENSER_PORT, 9600)
@@ -483,7 +489,7 @@ class PaymentSystemAPI:
             logger.error(f"Failed to initialize bill dispenser: {e}")
 
 
-    def register_event_handlers(self) -> None:
+    def _register_event_handlers(self) -> None:
         """Register handlers for device events."""
         self.event_consumer.register_handler(
             EventType.BILL_ACCEPTED,
