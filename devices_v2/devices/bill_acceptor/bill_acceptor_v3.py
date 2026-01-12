@@ -34,7 +34,6 @@ from devices.ccnet import (
     CashCodeDriver,
     StateContext,
     EventType as CCNETEventType,
-    get_bill_amount,
 )
 
 logger = logging.getLogger(__name__)
