@@ -13,11 +13,17 @@ from typing import Final
 SYNC_BYTE: Final[int] = 0x02
 DEFAULT_DEVICE_ADDRESS: Final[int] = 0x03  # Bill Validator default address (page 12)
 CRC_POLYNOMIAL: Final[int] = 0x08408  # CCITT polynomial (page 10)
+MAX_PACKET_LENGTH: Final[int] = 250  # Maximum packet length
+MIN_PACKET_LENGTH: Final[int] = 6  # Minimum packet length (SYNC+ADR+LNG+CMD+CRC)
 
 # Timing constants (page 15)
 POLL_INTERVAL_MS: Final[int] = 200  # Poll every 200ms
 ACK_TIMEOUT_MS: Final[int] = 10  # ACK must be sent within 10ms
 RESPONSE_TIMEOUT_S: Final[float] = 1.0  # Response timeout in seconds
+
+# Buffer constants
+FLUSH_BUFFER_SIZE: Final[int] = 100  # Bytes to read when flushing buffer
+FLUSH_TIMEOUT_S: Final[float] = 0.1  # Timeout for buffer flush
 
 
 class Command(IntEnum):
@@ -141,11 +147,15 @@ STATE_NAMES: dict[int, str] = {
 }
 
 
-def get_state_name(state_code: int) -> str:
+def get_state_name(state_code: int | None) -> str:
     """Get human-readable state name from state code."""
+    if state_code is None:
+        return "UNKNOWN"
     return STATE_NAMES.get(state_code, f"UNKNOWN(0x{state_code:02X})")
 
 
-def get_bill_amount(bill_code: int) -> int:
+def get_bill_amount(bill_code: int | None) -> int:
     """Get bill amount in kopecks from bill code."""
+    if bill_code is None:
+        return 0
     return BILL_DENOMINATIONS.get(bill_code, 0)

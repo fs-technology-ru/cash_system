@@ -243,7 +243,7 @@ class BillValidatorStateMachine:
             logger.debug(f"State transition: {prev_name} -> {state_name}")
         
         # Build context
-        bill_code = data[0] if len(data) > 0 else None
+        bill_code = data[0] if data and len(data) > 0 else None
         bill_amount = get_bill_amount(bill_code) if bill_code else 0
         
         context = StateContext(

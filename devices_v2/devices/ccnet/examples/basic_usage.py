@@ -68,9 +68,12 @@ async def main():
     await driver.enable_validator()
     print("✓ Прием купюр включен. Ожидание купюр...")
     
+    # Create a shutdown event
+    shutdown_event = asyncio.Event()
+    
     try:
-        # Run forever (or until interrupted)
-        await asyncio.Future()
+        # Run forever (or until shutdown event is set)
+        await shutdown_event.wait()
     except asyncio.CancelledError:
         pass
     finally:

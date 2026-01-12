@@ -25,6 +25,10 @@ from .constants import (
     SYNC_BYTE,
     DEFAULT_DEVICE_ADDRESS,
     RESPONSE_TIMEOUT_S,
+    MAX_PACKET_LENGTH,
+    MIN_PACKET_LENGTH,
+    FLUSH_BUFFER_SIZE,
+    FLUSH_TIMEOUT_S,
     Command,
 )
 from .crc import calculate_crc16, verify_crc16
@@ -240,7 +244,7 @@ class CCNETTransport:
                 # Continue anyway, some devices may use different address in response
             
             # Validate length
-            if total_length < 6 or total_length > 250:
+            if total_length < MIN_PACKET_LENGTH or total_length > MAX_PACKET_LENGTH:
                 logger.warning(f"Invalid packet length: {total_length}")
                 await self._flush_buffer()
                 return None
@@ -279,8 +283,8 @@ class CCNETTransport:
         """Flush receive buffer to clear garbage data."""
         try:
             junk = await asyncio.wait_for(
-                self._reader.read(100),
-                timeout=0.1,
+                self._reader.read(FLUSH_BUFFER_SIZE),
+                timeout=FLUSH_TIMEOUT_S,
             )
             if junk:
                 logger.debug(f"Flushed {len(junk)} bytes: {junk.hex(' ')}")
